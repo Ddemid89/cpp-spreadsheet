@@ -3,12 +3,14 @@
 #include "FormulaBaseListener.h"
 #include "FormulaLexer.h"
 #include "FormulaParser.h"
+#include "common.h"
 
 #include <cassert>
 #include <cmath>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <functional>
 
 namespace ASTImpl {
 
@@ -72,7 +74,7 @@ public:
     virtual ~Expr() = default;
     virtual void Print(std::ostream& out) const = 0;
     virtual void DoPrintFormula(std::ostream& out, ExprPrecedence precedence) const = 0;
-    virtual double Evaluate(/*добавьте сюда нужные аргументы*/ args) const = 0;
+    virtual double Evaluate(const std::function<double(Position)>& mediator) const = 0;
 
     // higher is tighter
     virtual ExprPrecedence GetPrecedence() const = 0;
@@ -142,8 +144,30 @@ public:
         }
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/) const override {
-			// Скопируйте ваше решение из предыдущих уроков.
+    double Evaluate(const std::function<double(Position)>& mediator) const override {
+        double left_op  = lhs_->Evaluate(mediator);
+        double right_op = rhs_->Evaluate(mediator);
+
+        double result;
+
+        if (type_ == Type::Divide) {
+            if (right_op == 0) {
+                throw FormulaError(FormulaError::Category::Div0);
+            }
+            result = left_op / right_op;
+        } else if (type_ == Type::Add) {
+            result = left_op + right_op;
+        } else if (type_ == Type::Subtract) {
+            result = left_op - right_op;
+        } else if (type_ == Type::Multiply) {
+            result = left_op * right_op;
+        }
+
+        if (std::isinf(result)) {
+            throw FormulaError(FormulaError::Category::Div0);
+        }
+
+        return result;
     }
 
 private:
@@ -180,8 +204,11 @@ public:
         return EP_UNARY;
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
-        // Скопируйте ваше решение из предыдущих уроков.
+    double Evaluate(const std::function<double(Position)>& mediator) const override {
+        if (type_ == Type::UnaryMinus) {
+            return -operand_->Evaluate(mediator);
+        }
+        return operand_->Evaluate(mediator);
     }
 
 private:
@@ -191,15 +218,15 @@ private:
 
 class CellExpr final : public Expr {
 public:
-    explicit CellExpr(const Position* cell)
-        : cell_(cell) {
+    explicit CellExpr(std::string pos)
+        : cell_(Position::FromString(pos)) {
     }
 
     void Print(std::ostream& out) const override {
-        if (!cell_->IsValid()) {
+        if (!cell_.IsValid()) {
             out << FormulaError::Category::Ref;
         } else {
-            out << cell_->ToString();
+            out << cell_.ToString();
         }
     }
 
@@ -211,12 +238,15 @@ public:
         return EP_ATOM;
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
-        // реализуйте метод.
+    double Evaluate(const std::function<double(Position)>& mediator) const override {
+        if (!cell_.IsValid()) {
+            throw FormulaError(FormulaError::Category::Ref);
+        }
+        return mediator(cell_);
     }
 
 private:
-    const Position* cell_;
+    const Position cell_;
 };
 
 class NumberExpr final : public Expr {
@@ -237,7 +267,7 @@ public:
         return EP_ATOM;
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
+    double Evaluate(const std::function<double(Position)>& mediator) const override {
         return value_;
     }
 
@@ -298,7 +328,7 @@ public:
         }
 
         cells_.push_front(value);
-        auto node = std::make_unique<CellExpr>(&cells_.front());
+        auto node = std::make_unique<CellExpr>(value_str);
         args_.push_back(std::move(node));
     }
 
@@ -366,6 +396,7 @@ FormulaAST ParseFormulaAST(std::istream& in) {
     parser.removeErrorListeners();
 
     tree::ParseTree* tree = parser.main();
+
     ASTImpl::ParseASTListener listener;
     tree::ParseTreeWalker::DEFAULT.walk(&listener, tree);
 
@@ -391,14 +422,15 @@ void FormulaAST::PrintFormula(std::ostream& out) const {
     root_expr_->PrintFormula(out, ASTImpl::EP_ATOM);
 }
 
-double FormulaAST::Execute(/*добавьте нужные аргументы*/ args) const {
-    return root_expr_->Evaluate(/*добавьте нужные аргументы*/ args);
+double FormulaAST::Execute(const std::function<double(Position)>& mediator) const {
+    return root_expr_->Evaluate(mediator);
 }
 
 FormulaAST::FormulaAST(std::unique_ptr<ASTImpl::Expr> root_expr, std::forward_list<Position> cells)
     : root_expr_(std::move(root_expr))
     , cells_(std::move(cells)) {
     cells_.sort();  // to avoid sorting in GetReferencedCells
+    cells_.unique();
 }
 
 FormulaAST::~FormulaAST() = default;
